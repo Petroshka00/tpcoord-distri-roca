@@ -3,6 +3,7 @@ package sum
 import (
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/fruititem"
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/messageprotocol/inner"
@@ -21,9 +22,10 @@ type SumConfig struct {
 }
 
 type Sum struct {
-	inputQueue     middleware.Middleware
-	outputExchange middleware.Middleware
-	fruitItemMap   map[string]fruititem.FruitItem
+	inputQueue         middleware.Middleware
+	outputExchange     middleware.Middleware
+	clientFruitItemMap map[string]map[string]fruititem.FruitItem
+	mutex              sync.Mutex
 }
 
 func NewSum(config SumConfig) (*Sum, error) {
@@ -46,9 +48,9 @@ func NewSum(config SumConfig) (*Sum, error) {
 	}
 
 	return &Sum{
-		inputQueue:     inputQueue,
-		outputExchange: outputExchange,
-		fruitItemMap:   map[string]fruititem.FruitItem{},
+		inputQueue:         inputQueue,
+		outputExchange:     outputExchange,
+		clientFruitItemMap: map[string]map[string]fruititem.FruitItem{},
 	}, nil
 }
 
@@ -61,41 +63,48 @@ func (sum *Sum) Run() {
 func (sum *Sum) handleMessage(msg middleware.Message, ack func(), nack func()) {
 	defer ack()
 
-	fruitRecords, isEof, err := inner.DeserializeMessage(&msg)
+	clientID, fruitRecords, isEof, err := inner.DeserializeMessage(&msg)
 	if err != nil {
 		slog.Error("While deserializing message", "err", err)
 		return
 	}
 
 	if isEof {
-		if err := sum.handleEndOfRecordMessage(); err != nil {
+		if err := sum.handleEndOfRecordMessage(clientID); err != nil {
 			slog.Error("While handling end of record message", "err", err)
 		}
 		return
 	}
 
-	if err := sum.handleDataMessage(fruitRecords); err != nil {
+	if err := sum.handleDataMessage(clientID, fruitRecords); err != nil {
 		slog.Error("While handling data message", "err", err)
 	}
 }
 
-func (sum *Sum) handleEndOfRecordMessage() error {
-	slog.Info("Received End Of Records message")
-	for key := range sum.fruitItemMap {
-		fruitRecord := []fruititem.FruitItem{sum.fruitItemMap[key]}
-		message, err := inner.SerializeMessage(fruitRecord)
-		if err != nil {
-			slog.Debug("While serializing message", "err", err)
-			return err
-		}
-		if err := sum.outputExchange.Send(*message); err != nil {
-			slog.Debug("While sending message", "err", err)
-			return err
+func (sum *Sum) handleEndOfRecordMessage(clientID string) error {
+	slog.Info("Received End Of Records message", "clientID", clientID)
+
+	sum.mutex.Lock()
+	fruits, ok := sum.clientFruitItemMap[clientID]
+	delete(sum.clientFruitItemMap, clientID)
+	sum.mutex.Unlock()
+
+	if ok {
+		for key := range fruits {
+			fruitRecord := []fruititem.FruitItem{fruits[key]}
+			message, err := inner.SerializeMessage(clientID, fruitRecord, false)
+			if err != nil {
+				slog.Debug("While serializing message", "err", err)
+				return err
+			}
+			if err := sum.outputExchange.Send(*message); err != nil {
+				slog.Debug("While sending message", "err", err)
+				return err
+			}
 		}
 	}
 
-	eofMessage := []fruititem.FruitItem{}
-	message, err := inner.SerializeMessage(eofMessage)
+	message, err := inner.SerializeMessage(clientID, nil, true)
 	if err != nil {
 		slog.Debug("While serializing EOF message", "err", err)
 		return err
@@ -107,13 +116,22 @@ func (sum *Sum) handleEndOfRecordMessage() error {
 	return nil
 }
 
-func (sum *Sum) handleDataMessage(fruitRecords []fruititem.FruitItem) error {
+func (sum *Sum) handleDataMessage(clientID string, fruitRecords []fruititem.FruitItem) error {
+	sum.mutex.Lock()
+	defer sum.mutex.Unlock()
+
+	fruits, ok := sum.clientFruitItemMap[clientID]
+	if !ok {
+		fruits = make(map[string]fruititem.FruitItem)
+		sum.clientFruitItemMap[clientID] = fruits
+	}
+
 	for _, fruitRecord := range fruitRecords {
-		_, ok := sum.fruitItemMap[fruitRecord.Fruit]
+		_, ok := fruits[fruitRecord.Fruit]
 		if ok {
-			sum.fruitItemMap[fruitRecord.Fruit] = sum.fruitItemMap[fruitRecord.Fruit].Sum(fruitRecord)
+			fruits[fruitRecord.Fruit] = fruits[fruitRecord.Fruit].Sum(fruitRecord)
 		} else {
-			sum.fruitItemMap[fruitRecord.Fruit] = fruitRecord
+			fruits[fruitRecord.Fruit] = fruitRecord
 		}
 	}
 	return nil
