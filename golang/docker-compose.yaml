@@ -13,7 +13,7 @@ services:
     - MOM_HOST=rabbitmq
     - MOM_PORT=5672
     - OUTPUT_QUEUE=join_queue
-    - SUM_AMOUNT=1
+    - SUM_AMOUNT=3
     - SUM_PREFIX=sum
     - TOP_SIZE=3
   client_0:
@@ -23,6 +23,8 @@ services:
     container_name: client_0
     depends_on:
     - sum_0
+    - sum_1
+    - sum_2
     environment:
     - INPUT_FILE=/datasets/input_0.csv
     - OUTPUT_FILE=/output/output_0.csv
@@ -38,6 +40,8 @@ services:
     container_name: client_1
     depends_on:
     - sum_0
+    - sum_1
+    - sum_2
     environment:
     - INPUT_FILE=/datasets/input_1.csv
     - OUTPUT_FILE=/output/output_1.csv
@@ -53,6 +57,8 @@ services:
     container_name: client_2
     depends_on:
     - sum_0
+    - sum_1
+    - sum_2
     environment:
     - INPUT_FILE=/datasets/input_2.csv
     - OUTPUT_FILE=/output/output_2.csv
@@ -90,7 +96,7 @@ services:
     - MOM_HOST=rabbitmq
     - MOM_PORT=5672
     - OUTPUT_QUEUE=results_queue
-    - SUM_AMOUNT=1
+    - SUM_AMOUNT=3
     - SUM_PREFIX=sum
     - TOP_SIZE=3
   rabbitmq:
@@ -123,5 +129,37 @@ services:
     - INPUT_QUEUE=input_queue
     - MOM_HOST=rabbitmq
     - MOM_PORT=5672
-    - SUM_AMOUNT=1
+    - SUM_AMOUNT=3
+    - SUM_PREFIX=sum
+  sum_1:
+    build:
+      context: ./src/
+      dockerfile: sum/Dockerfile
+    container_name: sum_1
+    depends_on:
+    - aggregation_0
+    environment:
+    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_PREFIX=aggregation
+    - ID=1
+    - INPUT_QUEUE=input_queue
+    - MOM_HOST=rabbitmq
+    - MOM_PORT=5672
+    - SUM_AMOUNT=3
+    - SUM_PREFIX=sum
+  sum_2:
+    build:
+      context: ./src/
+      dockerfile: sum/Dockerfile
+    container_name: sum_2
+    depends_on:
+    - aggregation_0
+    environment:
+    - AGGREGATION_AMOUNT=1
+    - AGGREGATION_PREFIX=aggregation
+    - ID=2
+    - INPUT_QUEUE=input_queue
+    - MOM_HOST=rabbitmq
+    - MOM_PORT=5672
+    - SUM_AMOUNT=3
     - SUM_PREFIX=sum

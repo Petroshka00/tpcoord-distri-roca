@@ -22,9 +22,14 @@ type SumConfig struct {
 }
 
 type Sum struct {
+	id                 int
+	sumAmount          int
 	inputQueue         middleware.Middleware
 	outputExchange     middleware.Middleware
+	controlConsumer    middleware.Middleware
+	controlPublisher   middleware.Middleware
 	clientFruitItemMap map[string]map[string]fruititem.FruitItem
+	clientFinished     map[string]bool
 	mutex              sync.Mutex
 }
 
@@ -47,17 +52,76 @@ func NewSum(config SumConfig) (*Sum, error) {
 		return nil, err
 	}
 
+	var controlConsumer middleware.Middleware
+	var controlPublisher middleware.Middleware
+
+	if config.SumAmount > 1 {
+		controlExchangeName := fmt.Sprintf("%s_control", config.SumPrefix)
+		myKey := []string{fmt.Sprintf("%s_%d", config.SumPrefix, config.Id)}
+
+		controlConsumer, err = middleware.CreateExchangeMiddleware(controlExchangeName, myKey, connSettings)
+		if err != nil {
+			inputQueue.Close()
+			outputExchange.Close()
+			return nil, err
+		}
+
+		allKeys := make([]string, config.SumAmount)
+		for i := range config.SumAmount {
+			allKeys[i] = fmt.Sprintf("%s_%d", config.SumPrefix, i)
+		}
+
+		controlPublisher, err = middleware.CreateExchangeMiddleware(controlExchangeName, allKeys, connSettings)
+		if err != nil {
+			inputQueue.Close()
+			outputExchange.Close()
+			controlConsumer.Close()
+			return nil, err
+		}
+	}
+
 	return &Sum{
+		id:                 config.Id,
+		sumAmount:          config.SumAmount,
 		inputQueue:         inputQueue,
 		outputExchange:     outputExchange,
+		controlConsumer:    controlConsumer,
+		controlPublisher:   controlPublisher,
 		clientFruitItemMap: map[string]map[string]fruititem.FruitItem{},
+		clientFinished:     map[string]bool{},
 	}, nil
 }
 
 func (sum *Sum) Run() {
+	if sum.controlConsumer != nil {
+		go func() {
+			if err := sum.controlConsumer.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+				sum.handleControlMessage(msg, ack, nack)
+			}); err != nil {
+				slog.Error("Control consumer stopped", "err", err)
+			}
+		}()
+	}
+
 	sum.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
 		sum.handleMessage(msg, ack, nack)
 	})
+}
+
+func (sum *Sum) handleControlMessage(msg middleware.Message, ack func(), nack func()) {
+	defer ack()
+
+	clientID, _, isEof, err := inner.DeserializeMessage(&msg)
+	if err != nil {
+		slog.Error("While deserializing control message", "err", err)
+		return
+	}
+
+	if isEof {
+		if err := sum.handleControlEOF(clientID); err != nil {
+			slog.Error("While handling control EOF", "err", err)
+		}
+	}
 }
 
 func (sum *Sum) handleMessage(msg middleware.Message, ack func(), nack func()) {
@@ -70,8 +134,20 @@ func (sum *Sum) handleMessage(msg middleware.Message, ack func(), nack func()) {
 	}
 
 	if isEof {
-		if err := sum.handleEndOfRecordMessage(clientID); err != nil {
-			slog.Error("While handling end of record message", "err", err)
+		if sum.sumAmount > 1 && sum.controlPublisher != nil {
+			slog.Info("Broadcasting EOF to all sum instances", "sumID", sum.id, "clientID", clientID)
+			broadcastMsg, err := inner.SerializeMessage(clientID, nil, true)
+			if err != nil {
+				slog.Error("While serializing broadcast EOF", "err", err)
+				return
+			}
+			if err := sum.controlPublisher.Send(*broadcastMsg); err != nil {
+				slog.Error("While broadcasting EOF message", "err", err)
+			}
+		} else {
+			if err := sum.handleControlEOF(clientID); err != nil {
+				slog.Error("While handling end of record message", "err", err)
+			}
 		}
 		return
 	}
@@ -81,10 +157,15 @@ func (sum *Sum) handleMessage(msg middleware.Message, ack func(), nack func()) {
 	}
 }
 
-func (sum *Sum) handleEndOfRecordMessage(clientID string) error {
-	slog.Info("Received End Of Records message", "clientID", clientID)
+func (sum *Sum) handleControlEOF(clientID string) error {
+	slog.Info("Handling EOF for client", "sumID", sum.id, "clientID", clientID)
 
 	sum.mutex.Lock()
+	if sum.clientFinished[clientID] {
+		sum.mutex.Unlock()
+		return nil
+	}
+	sum.clientFinished[clientID] = true
 	fruits, ok := sum.clientFruitItemMap[clientID]
 	delete(sum.clientFruitItemMap, clientID)
 	sum.mutex.Unlock()
@@ -119,6 +200,10 @@ func (sum *Sum) handleEndOfRecordMessage(clientID string) error {
 func (sum *Sum) handleDataMessage(clientID string, fruitRecords []fruititem.FruitItem) error {
 	sum.mutex.Lock()
 	defer sum.mutex.Unlock()
+
+	if sum.clientFinished[clientID] {
+		return nil
+	}
 
 	fruits, ok := sum.clientFruitItemMap[clientID]
 	if !ok {
