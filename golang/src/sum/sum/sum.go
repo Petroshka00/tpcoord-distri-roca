@@ -2,6 +2,7 @@ package sum
 
 import (
 	"fmt"
+	"hash/crc32"
 	"log/slog"
 	"sync"
 
@@ -24,8 +25,9 @@ type SumConfig struct {
 type Sum struct {
 	id                 int
 	sumAmount          int
+	aggregationAmount  int
 	inputQueue         middleware.Middleware
-	outputExchange     middleware.Middleware
+	outputExchanges    []middleware.Middleware
 	controlConsumer    middleware.Middleware
 	controlPublisher   middleware.Middleware
 	clientFruitItemMap map[string]map[string]fruititem.FruitItem
@@ -41,15 +43,18 @@ func NewSum(config SumConfig) (*Sum, error) {
 		return nil, err
 	}
 
-	outputExchangeRouteKeys := make([]string, config.AggregationAmount)
+	outputExchanges := make([]middleware.Middleware, config.AggregationAmount)
 	for i := range config.AggregationAmount {
-		outputExchangeRouteKeys[i] = fmt.Sprintf("%s_%d", config.AggregationPrefix, i)
-	}
-
-	outputExchange, err := middleware.CreateExchangeMiddleware(config.AggregationPrefix, outputExchangeRouteKeys, connSettings)
-	if err != nil {
-		inputQueue.Close()
-		return nil, err
+		routingKey := []string{fmt.Sprintf("%s_%d", config.AggregationPrefix, i)}
+		ex, err := middleware.CreateExchangeMiddleware(config.AggregationPrefix, routingKey, connSettings)
+		if err != nil {
+			inputQueue.Close()
+			for j := 0; j < i; j++ {
+				outputExchanges[j].Close()
+			}
+			return nil, err
+		}
+		outputExchanges[i] = ex
 	}
 
 	var controlConsumer middleware.Middleware
@@ -62,7 +67,9 @@ func NewSum(config SumConfig) (*Sum, error) {
 		controlConsumer, err = middleware.CreateExchangeMiddleware(controlExchangeName, myKey, connSettings)
 		if err != nil {
 			inputQueue.Close()
-			outputExchange.Close()
+			for _, ex := range outputExchanges {
+				ex.Close()
+			}
 			return nil, err
 		}
 
@@ -74,7 +81,9 @@ func NewSum(config SumConfig) (*Sum, error) {
 		controlPublisher, err = middleware.CreateExchangeMiddleware(controlExchangeName, allKeys, connSettings)
 		if err != nil {
 			inputQueue.Close()
-			outputExchange.Close()
+			for _, ex := range outputExchanges {
+				ex.Close()
+			}
 			controlConsumer.Close()
 			return nil, err
 		}
@@ -83,8 +92,9 @@ func NewSum(config SumConfig) (*Sum, error) {
 	return &Sum{
 		id:                 config.Id,
 		sumAmount:          config.SumAmount,
+		aggregationAmount:  config.AggregationAmount,
 		inputQueue:         inputQueue,
-		outputExchange:     outputExchange,
+		outputExchanges:    outputExchanges,
 		controlConsumer:    controlConsumer,
 		controlPublisher:   controlPublisher,
 		clientFruitItemMap: map[string]map[string]fruititem.FruitItem{},
@@ -178,8 +188,10 @@ func (sum *Sum) handleControlEOF(clientID string) error {
 				slog.Debug("While serializing message", "err", err)
 				return err
 			}
-			if err := sum.outputExchange.Send(*message); err != nil {
-				slog.Debug("While sending message", "err", err)
+
+			targetIndex := crc32.ChecksumIEEE([]byte(fruits[key].Fruit)) % uint32(sum.aggregationAmount)
+			if err := sum.outputExchanges[targetIndex].Send(*message); err != nil {
+				slog.Debug("While sending partitioned message", "err", err)
 				return err
 			}
 		}
@@ -190,9 +202,11 @@ func (sum *Sum) handleControlEOF(clientID string) error {
 		slog.Debug("While serializing EOF message", "err", err)
 		return err
 	}
-	if err := sum.outputExchange.Send(*message); err != nil {
-		slog.Debug("While sending EOF message", "err", err)
-		return err
+	for _, exchange := range sum.outputExchanges {
+		if err := exchange.Send(*message); err != nil {
+			slog.Debug("While sending EOF message", "err", err)
+			return err
+		}
 	}
 	return nil
 }
