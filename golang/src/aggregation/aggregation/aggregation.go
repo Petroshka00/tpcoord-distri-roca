@@ -1,10 +1,14 @@
 package aggregation
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"os/signal"
 	"sort"
 	"sync"
+	"syscall"
 
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/fruititem"
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/messageprotocol/inner"
@@ -58,10 +62,37 @@ func NewAggregation(config AggregationConfig) (*Aggregation, error) {
 	}, nil
 }
 
+func (aggregation *Aggregation) handleSignals() {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	<-signals
+	slog.Info("SIGTERM signal received")
+	_ = aggregation.inputExchange.StopConsuming()
+}
+
+func (aggregation *Aggregation) Close() error {
+	var errs []error
+	if err := aggregation.inputExchange.Close(); err != nil {
+		errs = append(errs, err)
+	}
+	if err := aggregation.outputQueue.Close(); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
 func (aggregation *Aggregation) Run() {
-	aggregation.inputExchange.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+	go aggregation.handleSignals()
+
+	if err := aggregation.inputExchange.StartConsuming(func(msg middleware.Message, ack, nack func()) {
 		aggregation.handleMessage(msg, ack, nack)
-	})
+	}); err != nil {
+		slog.Error("Input exchange consumer stopped", "err", err)
+	}
+
+	if err := aggregation.Close(); err != nil {
+		slog.Error("Error closing aggregation resources", "err", err)
+	}
 }
 
 func (aggregation *Aggregation) handleMessage(msg middleware.Message, ack func(), nack func()) {

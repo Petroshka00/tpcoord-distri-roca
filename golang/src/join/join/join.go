@@ -1,9 +1,13 @@
 package join
 
 import (
+	"errors"
 	"log/slog"
+	"os"
+	"os/signal"
 	"sort"
 	"sync"
+	"syscall"
 
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/fruititem"
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/messageprotocol/inner"
@@ -56,10 +60,37 @@ func NewJoin(config JoinConfig) (*Join, error) {
 	}, nil
 }
 
+func (join *Join) handleSignals() {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	<-signals
+	slog.Info("SIGTERM signal received")
+	_ = join.inputQueue.StopConsuming()
+}
+
+func (join *Join) Close() error {
+	var errs []error
+	if err := join.inputQueue.Close(); err != nil {
+		errs = append(errs, err)
+	}
+	if err := join.outputQueue.Close(); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
 func (join *Join) Run() {
-	join.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+	go join.handleSignals()
+
+	if err := join.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
 		join.handleMessage(msg, ack, nack)
-	})
+	}); err != nil {
+		slog.Error("Input queue consumer stopped", "err", err)
+	}
+
+	if err := join.Close(); err != nil {
+		slog.Error("Error closing join resources", "err", err)
+	}
 }
 
 func (join *Join) handleMessage(msg middleware.Message, ack func(), nack func()) {

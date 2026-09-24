@@ -1,10 +1,14 @@
 package sum
 
 import (
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"log/slog"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/fruititem"
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/messageprotocol/inner"
@@ -102,9 +106,48 @@ func NewSum(config SumConfig) (*Sum, error) {
 	}, nil
 }
 
-func (sum *Sum) Run() {
+func (sum *Sum) handleSignals() {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	<-signals
+	slog.Info("SIGTERM signal received")
 	if sum.controlConsumer != nil {
+		_ = sum.controlConsumer.StopConsuming()
+	}
+	_ = sum.inputQueue.StopConsuming()
+}
+
+func (sum *Sum) Close() error {
+	var errs []error
+	if sum.controlConsumer != nil {
+		if err := sum.controlConsumer.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if sum.controlPublisher != nil {
+		if err := sum.controlPublisher.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if err := sum.inputQueue.Close(); err != nil {
+		errs = append(errs, err)
+	}
+	for _, ex := range sum.outputExchanges {
+		if err := ex.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (sum *Sum) Run() {
+	go sum.handleSignals()
+
+	var wg sync.WaitGroup
+	if sum.controlConsumer != nil {
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			if err := sum.controlConsumer.StartConsuming(func(msg middleware.Message, ack, nack func()) {
 				sum.handleControlMessage(msg, ack, nack)
 			}); err != nil {
@@ -113,9 +156,16 @@ func (sum *Sum) Run() {
 		}()
 	}
 
-	sum.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+	if err := sum.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
 		sum.handleMessage(msg, ack, nack)
-	})
+	}); err != nil {
+		slog.Error("Input queue consumer stopped", "err", err)
+	}
+
+	wg.Wait()
+	if err := sum.Close(); err != nil {
+		slog.Error("Error closing sum resources", "err", err)
+	}
 }
 
 func (sum *Sum) handleControlMessage(msg middleware.Message, ack func(), nack func()) {
