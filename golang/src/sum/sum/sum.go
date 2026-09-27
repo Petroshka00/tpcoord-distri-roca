@@ -47,6 +47,8 @@ func NewSum(config SumConfig) (*Sum, error) {
 		return nil, err
 	}
 
+	// Creamos un exchange por cada replica de aggregation para permitir el particionado
+	// de frutas por hash y evitar que todas las replicas procesen datos redundantes.
 	outputExchanges := make([]middleware.Middleware, config.AggregationAmount)
 	for i := range config.AggregationAmount {
 		routingKey := []string{fmt.Sprintf("%s_%d", config.AggregationPrefix, i)}
@@ -64,6 +66,9 @@ func NewSum(config SumConfig) (*Sum, error) {
 	var controlConsumer middleware.Middleware
 	var controlPublisher middleware.Middleware
 
+	// Al escalar Sum (working queue), el Gateway entrega el EOF a una sola replica.
+	// Usamos un exchange para controlar las instancias de Sum y propagar el EOF
+	// hacia todas las demas y sincronizar el fin de procesado de un cliente.
 	if config.SumAmount > 1 {
 		controlExchangeName := fmt.Sprintf("%s_control", config.SumPrefix)
 		myKey := []string{fmt.Sprintf("%s_%d", config.SumPrefix, config.Id)}
@@ -106,6 +111,8 @@ func NewSum(config SumConfig) (*Sum, error) {
 	}, nil
 }
 
+// Graceful shutdown: ante SIGINT o SIGTERM detenemos el consumo para
+// procesar los mensajes en vuelo y luego liberar los recursos AMQP.
 func (sum *Sum) handleSignals() {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
@@ -162,6 +169,7 @@ func (sum *Sum) Run() {
 		slog.Error("Input queue consumer stopped", "err", err)
 	}
 
+	// Esperamos que finalicen las suscripciones antes de cerrar conexiones
 	wg.Wait()
 	if err := sum.Close(); err != nil {
 		slog.Error("Error closing sum resources", "err", err)
@@ -221,6 +229,7 @@ func (sum *Sum) handleControlEOF(clientID string) error {
 	slog.Info("Handling EOF for client", "sumID", sum.id, "clientID", clientID)
 
 	sum.mutex.Lock()
+	// Evitamos procesar dos veces el EOF (el propio y el transmitido por control)
 	if sum.clientFinished[clientID] {
 		sum.mutex.Unlock()
 		return nil
@@ -228,6 +237,7 @@ func (sum *Sum) handleControlEOF(clientID string) error {
 	sum.clientFinished[clientID] = true
 	fruits, ok := sum.clientFruitItemMap[clientID]
 	delete(sum.clientFruitItemMap, clientID)
+	// Liberamos el mutex antes de enviar por red para no bloquear a otros clientes
 	sum.mutex.Unlock()
 
 	if ok {
@@ -239,6 +249,8 @@ func (sum *Sum) handleControlEOF(clientID string) error {
 				return err
 			}
 
+			// Particionado por hash:
+			// cada fruta se enruta a un unico Aggregator para evitar trabajo innecesario
 			targetIndex := crc32.ChecksumIEEE([]byte(fruits[key].Fruit)) % uint32(sum.aggregationAmount)
 			if err := sum.outputExchanges[targetIndex].Send(*message); err != nil {
 				slog.Debug("While sending partitioned message", "err", err)
@@ -247,6 +259,7 @@ func (sum *Sum) handleControlEOF(clientID string) error {
 		}
 	}
 
+	// Notificamos el EOF a todos los aggregators
 	message, err := inner.SerializeMessage(clientID, nil, true)
 	if err != nil {
 		slog.Debug("While serializing EOF message", "err", err)

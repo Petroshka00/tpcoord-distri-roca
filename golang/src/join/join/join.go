@@ -109,6 +109,8 @@ func (join *Join) handleMessage(msg middleware.Message, ack func(), nack func())
 		return
 	}
 
+	// Barrier de sincronizacion: esperamos que finalicen todas las replicas de
+	// Aggregation antes de consolidar el top global.
 	join.clientEofCount[clientID]++
 	count := join.clientEofCount[clientID]
 	if count < join.aggregationAmount {
@@ -127,6 +129,7 @@ func (join *Join) handleMessage(msg middleware.Message, ack func(), nack func())
 	finalTopSize := min(join.topSize, len(allRecords))
 	finalTop := allRecords[:finalTopSize]
 
+	// El Joiner envia solamente el top final hacia el Gateway y no envia EOF.
 	resultMsg, err := inner.SerializeMessage(clientID, finalTop, false)
 	if err != nil {
 		slog.Error("While serializing final result in join", "err", err)

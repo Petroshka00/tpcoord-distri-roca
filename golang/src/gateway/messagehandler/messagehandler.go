@@ -16,6 +16,8 @@ type MessageHandler struct {
 	clientID string
 }
 
+// Cada conexion de cliente genera un id unico para
+// relacionar sus mensajes a lo largo de todo el procesamiento.
 func NewMessageHandler() MessageHandler {
 	id := atomic.AddUint64(&clientCounter, 1)
 	return MessageHandler{
@@ -38,7 +40,8 @@ func (messageHandler *MessageHandler) DeserializeResultMessage(message *middlewa
 		return nil, err
 	}
 	if clientID != messageHandler.clientID {
-		// Message belongs to another client, gateway should try other handlers
+		// Si el resultado pertenece a otro cliente, devolvemos nil para que
+		// el loop del gateway continue buscando el handler correspondiente.
 		return nil, nil
 	}
 	return fruitRecords, nil

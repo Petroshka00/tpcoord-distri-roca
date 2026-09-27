@@ -118,6 +118,8 @@ func (aggregation *Aggregation) handleEndOfRecordsMessage(clientID string) error
 	slog.Info("Received End Of Records message", "clientID", clientID)
 
 	aggregation.mutex.Lock()
+	// Barrier de sincronizacion: esperamos el EOF de cada una
+	// de las instancias de Sum antes de calcular el top parcial.
 	aggregation.clientEofCount[clientID]++
 	count := aggregation.clientEofCount[clientID]
 	if count < aggregation.sumAmount {
@@ -125,9 +127,11 @@ func (aggregation *Aggregation) handleEndOfRecordsMessage(clientID string) error
 		return nil
 	}
 
+	// Libero la memoria del cliente para evitar memory leaks
 	fruits := aggregation.clientFruitItemMap[clientID]
 	delete(aggregation.clientFruitItemMap, clientID)
 	delete(aggregation.clientEofCount, clientID)
+	// Calculo de top y envio fuera de la seccion critica
 	aggregation.mutex.Unlock()
 
 	fruitTopRecords := aggregation.buildFruitTop(fruits)
