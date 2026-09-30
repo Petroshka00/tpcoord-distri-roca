@@ -20,8 +20,7 @@ func deserializeJson(message []byte) ([]interface{}, error) {
 	return data, nil
 }
 
-// Encapsula los datos en un sobre [clientID, isEOF, records] para transportar la sesion
-// del cliente y la condicion de fin de ingesta de forma unificada en el middleware interno.
+// Serializa un mensaje en formato JSON con la estructura [clientID, isEOF, records]
 func SerializeMessage(clientID string, fruitRecords []fruititem.FruitItem, isEOF bool) (*middleware.Message, error) {
 	records := []interface{}{}
 	for _, fruitRecord := range fruitRecords {
