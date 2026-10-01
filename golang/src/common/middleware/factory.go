@@ -3,6 +3,8 @@ package middleware
 import (
 	"errors"
 	"fmt"
+	"os"
+	"strconv"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -170,8 +172,14 @@ func CreateQueueMiddleware(queueName string, connectionSettings ConnSettings) (M
 		return nil, ErrMessageMiddlewareMessage
 	}
 
-	// Fair Dispatch
-	_ = ch.Qos(1, 0, false)
+	// Fair Dispatch: configuracion de prefetch_count (30 por defecto, configurable por varenv)
+	prefetchCount := 30
+	if envVal := os.Getenv("PREFETCH_COUNT"); envVal != "" {
+		if parsed, err := strconv.Atoi(envVal); err == nil && parsed > 0 {
+			prefetchCount = parsed
+		}
+	}
+	_ = ch.Qos(prefetchCount, 0, false)
 
 	return &RabbitMQQueueMiddleware{
 		conn:      conn,

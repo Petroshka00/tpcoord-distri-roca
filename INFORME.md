@@ -92,3 +92,13 @@ Por estas razones se optó por el particionado por nombre de fruta, ya que permi
 - **Escalabilidad de `Sum`:** Al utilizar una Working Queue en `inputQueue`, es posible aumentar la cantidad de réplicas de `Sum` en el archivo de Docker compose sin modificar el código. RabbitMQ balancea las filas entrantes entre todos los workers disponibles.
 - **Escalabilidad de `Aggregation`:** El particionado `hash(fruit) % AGGREGATION_AMOUNT` permite aumentar la cantidad de réplicas de Aggregation de forma transparente a través de las varenvs.
 - **Independencia de Nombres:** Ningún nombre de queue, exchange o contenedor está hardcodeado.
+
+---
+
+## Cambios en el middleware
+
+En la entrega anterior (TP MOM), el canal de consumo de colas se encontraba configurado de forma fija con `prefetch_count = 1` para asegurar fair-dispatch. Pero, en un sistema pensado para procesar un flujo continuo de muchos registros livianos, este valor generaba un cuello de botella por la latencia de red, el consumidor debía esperar la ida y vuelta del paquete ACK antes de que RabbitMQ le enviara el siguiente mensaje.
+
+Considerando el impacto en la performance, se decidió modificar este comportamiento en el middleware:
+1. **Prefetch por defecto mas generoso:** Se incrementó el valor por defecto a `30`. Esta ventana permite que cada worker mantenga un buffer local de mensajes en transito mientras los ACKs se confirman asincrónicamente, sin perder la distribucion del trabajo entre las replicas.
+2. **Configuracion mediante varenv:** Para dar flexibilidad en distintos entornos, el valor se lee de la varenv `PREFETCH_COUNT`. Si no se define o si el valor dado no es un entero positivo, el sistema adopta el valor `30`.
